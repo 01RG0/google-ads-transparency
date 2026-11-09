@@ -2,10 +2,11 @@
 name = "ads-transparency-client"
 version = "0.1.0"
 requires-python = ">=3.11"
-dependencies = ["httpx>=0.27,<1", "pydantic>=2.6,<3", "fastapi>=0.110,<1"]
+dependencies = ["httpx>=0.27,<1", "pydantic>=2.6,<3"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-asyncio>=0.23", "uvicorn>=0.27"]
+api = ["fastapi>=0.110,<1", "uvicorn>=0.27"]
+dev = ["pytest>=8", "pytest-asyncio>=0.23"]
 
 [tool.setuptools]
 packages = ["client", "api"]

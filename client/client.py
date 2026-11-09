@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import random
 import time
 from datetime import date, timedelta
@@ -13,7 +14,7 @@ from pydantic import ValidationError
 
 from .errors import ResponseShapeError, UnsupportedFilterError, UpstreamHTTPError
 from .geo_targets import lookup_country_geo_target
-from .models import Advertiser, AdvertiserSuggestion, Creative, CreativeDetail, CreativePage
+from .models import Advertiser, AdvertiserSuggestion, Creative, CreativeDetail, CreativePage, DunsMappingEntry
 
 
 class TransparencyClient:
@@ -53,7 +54,7 @@ class TransparencyClient:
 
     async def _rpc(self, service_method: str, payload: dict[str, Any]) -> dict[str, Any]:
         url = self.BASE_URL + service_method + "?authuser="
-        body = "f.req=" + quote_plus(__import__("json").dumps(payload, separators=(",", ":")))
+        body = "f.req=" + quote_plus(json.dumps(payload, separators=(",", ":")))
         for attempt in range(self.max_retries + 1):
             await self._throttle()
             try:
@@ -158,6 +159,14 @@ class TransparencyClient:
 
     async def search_by_domain(self, domain: str, *, cursor: str | None = None, page_size: int = 40) -> CreativePage:
         return await self.list_creatives(domain=domain, cursor=cursor, page_size=page_size)
+
+    async def get_advertiser_duns_mapping(self) -> list[DunsMappingEntry]:
+        """Return every advertiser→DUNS entry in one shot. Cache the result; the upstream returns 6 000+ rows and is called on every page load by the site."""
+        data = await self._rpc("TfaarAdvertiserService/GetAdvertiserDunsMapping", {})
+        rows = data.get("1")
+        if not isinstance(rows, list):
+            raise ResponseShapeError("GetAdvertiserDunsMapping response is missing list field '1'")
+        return [self._model(DunsMappingEntry, row, "GetAdvertiserDunsMapping") for row in rows]
 
     async def get_creative(self, advertiser_id: str, creative_id: str) -> CreativeDetail | None:
         data = await self._rpc("LookupService/GetCreativeById", {

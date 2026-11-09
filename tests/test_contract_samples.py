@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from client.errors import ResponseShapeError
-from client.models import CreativeDetail, CreativePage
+from client.models import CreativeDetail, CreativePage, DunsMappingEntry
 
 SAMPLES = Path(__file__).parents[1] / "docs" / "samples"
 
@@ -49,3 +49,15 @@ def test_creative_detail_sample_matches_contract():
         raise ResponseShapeError("Saved GetCreativeById sample no longer matches the model") from exc
     assert detail.creative_id
     assert detail.variations
+
+
+def test_duns_mapping_sample_matches_contract():
+    payload = read_sample("POST__anji___rpc_tfaaradvertiserservice_getadvertiserdunsmapping.json")
+    rows = payload.get("1")
+    assert isinstance(rows, list) and rows, "DUNS mapping sample must be a non-empty list"
+    try:
+        entries = [DunsMappingEntry.model_validate(r) for r in rows]
+    except Exception as exc:
+        raise ResponseShapeError("Saved GetAdvertiserDunsMapping sample no longer matches the model") from exc
+    assert entries[0].advertiser_id.startswith("AR")
+    assert entries[0].duns_number.isdigit()

@@ -87,6 +87,28 @@ async def test_country_code_or_name_maps_to_geo_filter(region, geo_id):
     assert request["3"]["8"] == [geo_id]
 
 
+@pytest.mark.asyncio
+async def test_duns_mapping_sends_empty_payload():
+    class DunsFakeHTTP(FakeHTTP):
+        async def post(self, url, content):
+            self.url = url
+            self.content = content
+            return type("R", (), {
+                "status_code": 200,
+                "headers": {},
+                "json": lambda self: {"1": [{"1": "AR123", "2": "456789"}]},
+            })()
+
+    transport = DunsFakeHTTP()
+    client = TransparencyClient(client=transport, min_interval=0, max_retries=0)
+    entries = await client.get_advertiser_duns_mapping()
+    assert transport.url.endswith("TfaarAdvertiserService/GetAdvertiserDunsMapping?authuser=")
+    payload = json.loads(parse_qs(transport.content)["f.req"][0])
+    assert payload == {}
+    assert entries[0].advertiser_id == "AR123"
+    assert entries[0].duns_number == "456789"
+
+
 def test_geo_target_dataset_has_global_country_coverage_and_anywhere_alias():
     assert len(COUNTRY_GEO_TARGET_IDS) >= 220
     assert lookup_country_geo_target("US") == lookup_country_geo_target("United States") == 2840

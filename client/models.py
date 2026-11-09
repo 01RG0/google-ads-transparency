@@ -78,3 +78,8 @@ class CreativeSearchRequest(BaseModel):
     date_to: str | None = None
     cursor: str | None = None
     page_size: int = 40
+
+
+class DunsMappingEntry(RPCModel):
+    advertiser_id: str = Field(alias="1")
+    duns_number: str = Field(alias="2")
