@@ -1,181 +1,146 @@
-# Google Ads Transparency Center client
+# ads-transparency-client
 
-An async Python client and small FastAPI service for searching public ads in
-Google's Ads Transparency Center. The client sends the site's observed RPC
-requests with `httpx`; it does not start a browser. Playwright is used only by
-the capture scripts under `scripts/`.
+Typed async Python client for the Google Ads Transparency Center public RPC API (no authentication required).
 
-## What it supports
+## Installation
 
-- Advertiser autocomplete by name with `search_advertisers(query)`.
-- Creative search by advertiser or domain, including cursor pagination.
-- Country and territory filters using an ISO alpha-2 code or official English
-  name. The bundled mapping contains 219 active entries from Google's
-  geo-target dataset, plus the separately captured Palestine mapping. Use
-  `region="anywhere"` to leave region unrestricted. The Transparency Center
-  selector does not offer Iran.
-- Custom date ranges with ISO dates (`YYYY-MM-DD`). The UI's selected end date
-  is inclusive; the RPC encodes the following day as its exclusive upper
-  bound.
-- Advertiser and creative detail lookups.
-- Request throttling, timeouts, retries with jitter, typed Pydantic models, and
-  explicit errors when the upstream response shape changes.
-
-The numeric RPC field meanings and capture evidence are documented in
-[docs/endpoints.md](docs/endpoints.md). Raw HARs are kept in the ignored
-`captures/` directory and must not be committed.
-
-## Install
-
-Python 3.11 or newer is required.
-
-```powershell
-python -m pip install -e ".[dev]"
+```bash
+pip install -e .
 ```
 
-## Use the Python client
+Optional extras:
+
+```bash
+pip install -e ".[api]"   # FastAPI server + uvicorn
+pip install -e ".[dev]"   # Test dependencies
+```
+
+## Quick start
 
 ```python
 import asyncio
 from client import TransparencyClient
 
-
 async def main():
-    async with TransparencyClient() as ads:
-        matches = await ads.search_advertisers("Nike")
-        if not matches:
-            return
+    async with TransparencyClient() as client:
+        # Search advertisers
+        advertisers = await client.search_advertisers("Nike", limit=10)
+        advertiser_id = advertisers[0].advertiser_id
 
-        advertiser_id = matches[0].advertiser_id
-        page = await ads.list_creatives(
+        # List creatives with region and date filters
+        page = await client.list_creatives(
             advertiser_id=advertiser_id,
-            region="EG",                 # ISO country code or official name
-            date_from="2026-10-01",      # optional; supply both dates together
-            date_to="2026-10-31",
+            region="US",
+            date_from="2026-01-01",
+            date_to="2026-12-31",
         )
 
-        for creative in page.creatives:
-            print(creative.creative_id, creative.advertiser_name)
+        # Paginate all results automatically
+        async for creative in client.paginate(advertiser_id=advertiser_id, region="US"):
+            print(creative.creative_id, creative.domain)
 
-        if page.next_cursor:
-            next_page = await ads.list_creatives(
-                advertiser_id=advertiser_id,
-                region="Egypt",
-                date_from="2026-10-01",
-                date_to="2026-10-31",
-                cursor=page.next_cursor,
-            )
-            print("next page:", len(next_page.creatives))
+        # Fetch a single creative detail
+        detail = await client.get_creative(page.creatives[0].advertiser_id, page.creatives[0].creative_id)
 
-        if page.creatives:
-            detail = await ads.get_creative(advertiser_id, page.creatives[0].creative_id)
-            print(detail)
-
+        # Full advertiser → DUNS mapping (cache this; it returns 6000+ rows)
+        duns = await client.get_advertiser_duns_mapping()
 
 asyncio.run(main())
 ```
 
-Search by domain with `await ads.search_by_domain("nike.com")`. Continue
-pagination by passing `page.next_cursor` unchanged. `get_creative` calls the
-captured detail RPC directly.
+## Pagination
 
-### Example returned data
+Manual cursor loop:
 
-`search_advertisers("Nike")` returns advertiser suggestions like:
-
-```text
-name="Nike, Inc."
-advertiser_id="AR…"
-country_code="US"
+```python
+async with TransparencyClient() as client:
+    cursor = None
+    while True:
+        page = await client.list_creatives(advertiser_id="AR123", cursor=cursor)
+        for creative in page.creatives:
+            print(creative.creative_id, creative.advertiser_id)
+        if not page.next_cursor:
+            break
+        cursor = page.next_cursor
 ```
 
-Each item in `page.creatives` is a typed `Creative`. Here is a shortened
-`creative.model_dump()` from the captured response:
+Or use the built-in async generator:
 
-```json
-{
-  "advertiser_id": "AR…",
-  "creative_id": "CR…",
-  "advertiser_name": "WPP MEDIA MANAGEMENT",
-  "format_type": 1,
-  "first_shown": {"seconds": "1635145200", "nanos": 0},
-  "last_shown": {"seconds": "1793939486", "nanos": 47472000},
-  "region_count": 1838,
-  "domain": "nike.com",
-  "content": {
-    "3": {
-      "2": "<img src=\"https://tpc.googlesyndication.com/archive/simgad/<image-id>\" height=\"269\" width=\"348\">"
-    },
-    "5": true
-  }
-}
+```python
+async with TransparencyClient() as client:
+    async for creative in client.paginate(advertiser_id="AR123", region="GB"):
+        print(creative.creative_id)
 ```
 
-The `content` value is the site's format-specific creative data. For this image
-ad it contains HTML with the image's CDN `src`; the client returns that URL but
-does not download the image. Video and text creatives have different content.
-The enclosing `CreativePage` also provides `next_cursor`, `total_count`, and
-`alternate_count`. `get_creative(...)` returns detail data with its variations
-and preview URLs.
+## Sync usage
 
-The HTTP API serializes the original numeric RPC field keys, while the Python
-client exposes named fields such as `creative_id`, `format_type`, and `domain`.
+```python
+from client.sync_client import SyncTransparencyClient
 
-### Region data
+with SyncTransparencyClient() as client:
+    advertisers = client.search_advertisers("Nike")
+    for creative in client.paginate(advertiser_id=advertisers[0].advertiser_id):
+        print(creative.creative_id)
+```
 
-Country and territory IDs come from the
-[Google Ads geo-target dataset](https://developers.google.com/google-ads/api/data/geotargets),
-version `2026-10-06`; the source URL and attribution are also recorded in
-`client/geo_targets_countries.json`. The client accepts both codes such as
-`EG` and names such as `Egypt`. Palestine (`PS`, ID 2275) is a site-captured
-override because it is absent from that CSV. Unknown or unsupported values
-raise `UnsupportedFilterError` instead of silently omitting the filter.
+## CLI
 
-## Run the HTTP API
+```bash
+python -m client search-advertisers Nike
+python -m client search-advertisers Nike --limit 5
+python -m client get-advertiser AR12345
+python -m client list-creatives --advertiser AR12345 --region US --from 2026-01-01 --to 2026-12-31
+python -m client list-creatives --domain nike.com --pages 3
+```
 
-```powershell
+## Available methods
+
+| Method | Parameters | Returns |
+|--------|------------|---------|
+| `search_advertisers` | `query: str`, `limit: int = 10` | `list[AdvertiserSuggestion]` |
+| `get_advertiser` | `advertiser_id: str` | `Advertiser \| None` |
+| `list_creatives` | `advertiser_id`, `domain`, `region`, `date_from`, `date_to`, `cursor`, `page_size=40` | `CreativePage` |
+| `search_by_domain` | `domain: str`, `cursor`, `page_size=40` | `CreativePage` |
+| `paginate` | same as `list_creatives` minus `cursor` | `AsyncGenerator[Creative, None]` |
+| `get_creative` | `advertiser_id: str`, `creative_id: str` | `CreativeDetail \| None` |
+| `get_advertiser_duns_mapping` | — | `list[DunsMappingEntry]` |
+
+`page_size` max is 40.
+
+## Region filter
+
+Accepts ISO 3166-1 alpha-2 codes (`US`, `GB`, `PS`) or official English country names (`United States`, `Palestine`). Pass `"anywhere"` or omit to get results from all regions. Iran is not available on the Transparency Center.
+
+## Date filter
+
+`date_from` and `date_to` are `YYYY-MM-DD` strings and must be supplied together. Providing only one raises `ValueError`.
+
+## Error types
+
+| Exception | When raised |
+|-----------|-------------|
+| `TransparencyError` | Base class for all client errors |
+| `ResponseShapeError` | Upstream returned a shape outside the captured contract |
+| `UnsupportedFilterError` | Filter value not supported (e.g. unknown country code) |
+| `UpstreamHTTPError` | Non-2xx HTTP response after retries |
+
+All exceptions are exported from `client.errors`.
+
+## FastAPI server
+
+```bash
+pip install -e ".[api]"
 uvicorn api.app:app --reload
 ```
 
-Interactive API documentation: <http://127.0.0.1:8000/docs>
+Endpoints mirror the client methods as REST routes.
 
-| Route | Purpose |
-|---|---|
-| `GET /advertisers/search?q=Nike` | Search advertiser suggestions |
-| `GET /advertisers/{advertiser_id}` | Get advertiser details |
-| `GET /domains/{domain}/creatives` | Search creatives by domain |
-| `POST /creatives/search` | Search with advertiser, region, date, and cursor filters |
-| `GET /advertisers/{advertiser_id}/creatives/{creative_id}` | Get creative details |
+## Tests
 
-Example request body for `POST /creatives/search`:
+```bash
+# Contract and request-encoding tests (no network)
+pytest -m "not live"
 
-```json
-{
-  "advertiser_id": "AR…",
-  "region": "EG",
-  "date_from": "2026-10-01",
-  "date_to": "2026-10-31",
-  "page_size": 40
-}
+# Live smoke tests against the real API
+ADS_TRANSPARENCY_LIVE=1 pytest -m live
 ```
-
-## Tests and daily monitoring
-
-Run the saved response-contract tests without network access:
-
-```powershell
-python -m pytest -q -m "not live"
-```
-
-The live smoke test makes two requests to the public site: advertiser search,
-then creative listing. Run it manually in PowerShell with:
-
-```powershell
-$env:ADS_TRANSPARENCY_LIVE = "1"
-python -m pytest -q -m live
-```
-
-GitHub Actions runs the offline contracts and live smoke test every day at
-09:17 UTC. Use **Actions → Daily Transparency Center smoke test → Run workflow**
-to trigger it manually. A failed run indicates that the public service was
-unavailable or its response no longer matches the current client contract.

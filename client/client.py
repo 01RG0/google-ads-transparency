@@ -5,6 +5,7 @@ import asyncio
 import json
 import random
 import time
+from collections.abc import AsyncGenerator
 from datetime import date, timedelta
 from typing import Any
 from urllib.parse import quote_plus
@@ -156,6 +157,16 @@ class TransparencyClient:
         if not isinstance(data.get("1"), list):
             raise ResponseShapeError("SearchCreatives response is missing list field '1'")
         return self._model(CreativePage, data, "SearchCreatives")
+
+    async def paginate(self, advertiser_id=None, region=None, date_from=None, date_to=None, *, domain=None, page_size=40) -> AsyncGenerator[Creative, None]:
+        cursor: str | None = None
+        while True:
+            page = await self.list_creatives(advertiser_id=advertiser_id, region=region, date_from=date_from, date_to=date_to, cursor=cursor, domain=domain, page_size=page_size)
+            for creative in page.creatives:
+                yield creative
+            if page.next_cursor is None:
+                return
+            cursor = page.next_cursor
 
     async def search_by_domain(self, domain: str, *, cursor: str | None = None, page_size: int = 40) -> CreativePage:
         return await self.list_creatives(domain=domain, cursor=cursor, page_size=page_size)

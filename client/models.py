@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class RPCModel(BaseModel):
@@ -21,6 +21,26 @@ class AdvertiserSuggestion(RPCModel):
     advertiser_id: str | None = Field(default=None, alias="2")
     country_code: str | None = Field(default=None, alias="3")
     raw: dict[str, Any] = Field(default_factory=dict, exclude=True)
+    ad_count_lower: str | None = Field(default=None, exclude=True)
+    ad_count_upper: str | None = Field(default=None, exclude=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _populate_ad_counts(cls, values: Any) -> Any:
+        if not isinstance(values, dict):
+            return values
+        raw = values.get("raw")
+        if not isinstance(raw, dict):
+            raw = values
+        ad_counts = raw.get("4")
+        if isinstance(ad_counts, dict):
+            ad_counts = ad_counts.get("2")
+        if isinstance(ad_counts, dict):
+            if "ad_count_lower" not in values:
+                values["ad_count_lower"] = ad_counts.get("1")
+            if "ad_count_upper" not in values:
+                values["ad_count_upper"] = ad_counts.get("2")
+        return values
 
 
 class Timestamp(RPCModel):
