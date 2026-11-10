@@ -728,6 +728,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if hasattr(sys.stdout, "reconfigure"):
             sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        if hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
         asyncio.run(_run())
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr)
