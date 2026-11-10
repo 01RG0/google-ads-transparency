@@ -86,12 +86,45 @@ with SyncTransparencyClient() as client:
 ## CLI
 
 ```bash
-python -m client search-advertisers Nike
+# Search & discovery
 python -m client search-advertisers Nike --limit 5
+python -m client find-advertisers pepsi cola soda          # multi-keyword, deduplicated
+python -m client discover-competitors nike.com             # find other advertisers on a domain
 python -m client get-advertiser AR12345
+
+# List creatives
 python -m client list-creatives --advertiser AR12345 --region US --from 2026-01-01 --to 2026-12-31
 python -m client list-creatives --domain nike.com --pages 3
+python -m client list-creatives --domain nike.com --all-pages   # fetch everything
+
+# Export
+python -m client list-creatives --domain pepsi.com --format xlsx --output pepsi.xlsx
+python -m client list-creatives --domain pepsi.com --format csv > pepsi.csv
+
+# Analytics
+python -m client advertiser-stats AR12345 --pages 5
+python -m client compare-advertisers AR111 AR222
+
+# Download preview images
+python -m client download-previews AR12345 --output ./ads --limit 100
+
+# AI-powered (needs an API key — set GROQ_API_KEY, OPENAI_API_KEY, or ANTHROPIC_API_KEY)
+python -m client summarize-advertiser AR12345 --provider groq
+python -m client smart-compare AR111 AR222 --provider openai --model gpt-4o-mini
+python -m client suggest-keywords nike.com --provider anthropic
+python -m client summarize-advertiser AR12345 --provider ollama --model llama3.2   # local, free
 ```
+
+### AI providers
+
+| Provider | Env variable | Default model | Notes |
+|---|---|---|---|
+| `groq` | `GROQ_API_KEY` | `llama-3.3-70b-versatile` | Fast, free tier available |
+| `openai` | `OPENAI_API_KEY` | `gpt-4o-mini` | |
+| `anthropic` | `ANTHROPIC_API_KEY` | `claude-haiku-5-5` | |
+| `together` | `TOGETHER_API_KEY` | `meta-llama/Llama-3.3-70B-Instruct-Turbo` | |
+| `ollama` | — | `llama3.2` | Local, no key needed |
+| `custom` | `AI_API_KEY` | set `--model` | Pass `--base-url` for any OpenAI-compatible endpoint |
 
 ## Available methods
 

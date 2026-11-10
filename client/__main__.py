@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
+from .ai import ai_complete, list_providers
 from .client import TransparencyClient
 from .errors import TransparencyError
 
@@ -89,10 +90,12 @@ async def _list_creatives(client: TransparencyClient, args: argparse.Namespace) 
     columns = ["creative_id", "advertiser_id", "format_type", "domain"]
     rows: list[list[str]] = []
     cursor: str | None = None
+    all_pages: bool = getattr(args, "all_pages", False)
+    max_pages: int = 999_999 if all_pages else args.pages
     pages = 0
-    while pages < args.pages:
+    while pages < max_pages:
         pages += 1
-        if args.pages > 1 and args.format == "table":
+        if (all_pages or args.pages > 1) and args.format == "table":
             print(f"Fetching page {pages}...", file=sys.stderr)
         page = await client.list_creatives(
             advertiser_id=args.advertiser,
@@ -246,6 +249,109 @@ async def _compare_advertisers(client: TransparencyClient, args: argparse.Namesp
     print(f"{'Latest ad':<26}  {fmt_dt(l1):<{w}}  {fmt_dt(l2)}")
 
 
+def _ai_args(sub: argparse.ArgumentParser) -> None:
+    sub.add_argument("--provider", default="groq",
+                     help=f"AI provider: {', '.join(list_providers())}, or custom (default: groq)")
+    sub.add_argument("--model", default=None, help="Model name (uses provider default if omitted)")
+    sub.add_argument("--api-key", dest="api_key", default=None,
+                     help="API key (uses env variable if omitted)")
+    sub.add_argument("--base-url", dest="base_url", default=None,
+                     help="Base URL for custom/self-hosted providers")
+
+
+async def _summarize_advertiser(client: TransparencyClient, args: argparse.Namespace) -> None:
+    adv = await client.get_advertiser(args.advertiser_id)
+    if adv is None:
+        print("Advertiser not found", file=sys.stderr)
+        return
+    total_count, fc, domains, sampled, earliest, latest = await _collect_stats(
+        client, args.advertiser_id, args.pages
+    )
+    fmt_dt = lambda dt: dt.strftime("%Y-%m-%d") if dt else "unknown"
+    facts = [
+        f"Advertiser: {adv.name} ({adv.advertiser_id}), country: {adv.country_code}",
+        f"Approximate total ads: {total_count or 'unknown'}",
+    ]
+    if sampled:
+        for ft, name in _FORMAT_NAMES.items():
+            count = fc.get(ft, 0)
+            if count:
+                facts.append(f"{name} ads: {round(100 * count / sampled)}% of sample")
+    if domains:
+        facts.append(f"Top domains: {', '.join(d for d, _ in domains.most_common(5))}")
+    if earliest or latest:
+        facts.append(f"Date range: {fmt_dt(earliest)} to {fmt_dt(latest)}")
+    data_text = "\n".join(f"- {f}" for f in facts)
+    prompt = (
+        f"Here is advertising data from Google Ads Transparency Center:\n\n{data_text}\n\n"
+        "In 3-5 concise bullet points, summarize this advertiser's advertising strategy, "
+        "focusing on their format mix, geographic reach, and activity timeline."
+    )
+    print(f"Summarizing {adv.name} using {args.provider}...", file=sys.stderr)
+    print(await ai_complete(prompt, provider=args.provider, model=args.model,
+                            api_key=args.api_key, base_url=args.base_url))
+
+
+async def _smart_compare(client: TransparencyClient, args: argparse.Namespace) -> None:
+    adv1 = await client.get_advertiser(args.id1)
+    adv2 = await client.get_advertiser(args.id2)
+    tc1, fc1, dom1, s1, e1, l1 = await _collect_stats(client, args.id1, args.pages)
+    tc2, fc2, dom2, s2, e2, l2 = await _collect_stats(client, args.id2, args.pages)
+    fmt_dt = lambda dt: dt.strftime("%Y-%m-%d") if dt else "unknown"
+
+    def _block(adv, aid, tc, fc, dom, s, e, l) -> str:
+        name = (adv.name if adv else aid) or aid
+        lines = [f"Name: {name}", f"Total ads: {tc or 'unknown'}"]
+        if s:
+            for ft, fn in _FORMAT_NAMES.items():
+                pct = round(100 * fc.get(ft, 0) / s)
+                if pct:
+                    lines.append(f"{fn}: {pct}%")
+        if dom:
+            lines.append(f"Top domains: {', '.join(d for d, _ in dom.most_common(3))}")
+        lines.append(f"Active: {fmt_dt(e)} to {fmt_dt(l)}")
+        return "\n".join(f"  {x}" for x in lines)
+
+    name1 = (adv1.name if adv1 else args.id1) or args.id1
+    name2 = (adv2.name if adv2 else args.id2) or args.id2
+    prompt = (
+        f"Advertising data for two advertisers (Google Ads Transparency Center):\n\n"
+        f"Advertiser A:\n{_block(adv1, args.id1, tc1, fc1, dom1, s1, e1, l1)}\n\n"
+        f"Advertiser B:\n{_block(adv2, args.id2, tc2, fc2, dom2, s2, e2, l2)}\n\n"
+        "Compare these two advertisers. What are the key strategic differences? "
+        "Who seems more aggressive? What can each learn from the other? "
+        "Give 4-6 actionable insights."
+    )
+    print(f"Comparing {name1} vs {name2} using {args.provider}...", file=sys.stderr)
+    print(await ai_complete(prompt, provider=args.provider, model=args.model,
+                            api_key=args.api_key, base_url=args.base_url))
+
+
+async def _suggest_keywords(client: TransparencyClient, args: argparse.Namespace) -> None:
+    page = await client.list_creatives(domain=args.domain, page_size=40)
+    domains: set[str] = set()
+    fc: collections.Counter[int] = collections.Counter()
+    for c in page.creatives:
+        if c.domain:
+            domains.add(c.domain)
+        fc[c.format_type or 0] += 1
+    data_text = "\n".join(f"- {l}" for l in [
+        f"Domain searched: {args.domain}",
+        f"Approximate total ads: {page.total_count or 'unknown'}",
+        f"Related domains: {', '.join(sorted(domains)[:10])}",
+        f"Display: {fc[1]}, Video: {fc[2]}, Search: {fc[3]} (first page sample)",
+    ])
+    prompt = (
+        f'A marketer is researching "{args.domain}" via Google Ads Transparency Center:\n\n'
+        f"{data_text}\n\n"
+        "Suggest 10-15 high-value search keywords they should target to compete with or "
+        "complement advertisers on this domain. Group by theme. Be specific and actionable."
+    )
+    print(f"Suggesting keywords for {args.domain} using {args.provider}...", file=sys.stderr)
+    print(await ai_complete(prompt, provider=args.provider, model=args.model,
+                            api_key=args.api_key, base_url=args.base_url))
+
+
 async def _download_previews(client: TransparencyClient, args: argparse.Namespace) -> None:
     from .downloader import download_previews as _dl
     out = Path(args.output)
@@ -278,6 +384,7 @@ def build_parser() -> argparse.ArgumentParser:
     creatives.add_argument("--from", dest="date_from", help="Start date (YYYY-MM-DD)")
     creatives.add_argument("--to", dest="date_to", help="End date (YYYY-MM-DD)")
     creatives.add_argument("--pages", type=int, default=1, help="Max pages to paginate (default 1)")
+    creatives.add_argument("--all-pages", dest="all_pages", action="store_true", help="Fetch all pages (overrides --pages)")
     creatives.add_argument("--format", choices=fmt_choices, default="table", help=fmt_help)
     creatives.add_argument("--output", default="output.xlsx", help="Output file for xlsx format")
 
@@ -311,6 +418,24 @@ def build_parser() -> argparse.ArgumentParser:
     cmp.add_argument("id2", help="Second advertiser ID")
     cmp.add_argument("--pages", type=int, default=3, help="Pages to sample per advertiser (default 3)")
 
+    # summarize-advertiser
+    summ = subparsers.add_parser("summarize-advertiser", help="AI summary of an advertiser's strategy")
+    summ.add_argument("advertiser_id", help="Advertiser ID (AR...)")
+    summ.add_argument("--pages", type=int, default=3, help="Pages to sample (default 3)")
+    _ai_args(summ)
+
+    # smart-compare
+    sc = subparsers.add_parser("smart-compare", help="AI-powered comparison of two advertisers")
+    sc.add_argument("id1", help="First advertiser ID")
+    sc.add_argument("id2", help="Second advertiser ID")
+    sc.add_argument("--pages", type=int, default=3, help="Pages to sample per advertiser (default 3)")
+    _ai_args(sc)
+
+    # suggest-keywords
+    sk = subparsers.add_parser("suggest-keywords", help="AI keyword suggestions based on a domain")
+    sk.add_argument("domain", help="Domain to research (e.g. nike.com)")
+    _ai_args(sk)
+
     # download-previews
     dl = subparsers.add_parser("download-previews", help="Download ad preview images for an advertiser")
     dl.add_argument("advertiser_id", help="Advertiser ID (AR...)")
@@ -341,6 +466,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 await _advertiser_stats(client, args)
             elif args.command == "compare-advertisers":
                 await _compare_advertisers(client, args)
+            elif args.command == "summarize-advertiser":
+                await _summarize_advertiser(client, args)
+            elif args.command == "smart-compare":
+                await _smart_compare(client, args)
+            elif args.command == "suggest-keywords":
+                await _suggest_keywords(client, args)
             elif args.command == "download-previews":
                 await _download_previews(client, args)
 
