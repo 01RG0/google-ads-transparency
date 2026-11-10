@@ -95,7 +95,7 @@ async def ai_complete(
         provider_info = {"base_url": base_url, "env_var": None, "default_model": model}
 
     resolved_base_url = base_url or os.environ.get("AI_BASE_URL") or provider_info["base_url"]
-    if resolved_base_url is None:
+    if resolved_base_url is None and provider_lower != "anthropic":
         raise ValueError(f"No base_url configured for provider {provider!r}")
 
     resolved_model = model or os.environ.get("AI_MODEL") or provider_info["default_model"]

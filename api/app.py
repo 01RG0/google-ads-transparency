@@ -7,7 +7,7 @@ from fastapi import FastAPI, HTTPException, Query
 
 from client import TransparencyClient
 from client.errors import ResponseShapeError, UnsupportedFilterError, UpstreamHTTPError
-from client.models import CreativeSearchRequest
+from client.models import CreativeSearchRequest, DunsMappingEntry
 from pydantic import BaseModel
 
 
@@ -102,3 +102,95 @@ async def get_creative(advertiser_id: str, creative_id: str):
     if result is None:
         raise HTTPException(status_code=404, detail="Creative not found")
     return result
+
+
+@app.get('/duns-mapping', responses={502: {'model': ErrorResponse}})
+async def get_duns_mapping():
+    '''Returns the full advertiser->DUNS mapping (6000+ entries). Cache this response client-side.'''
+    try:
+        return await app.state.ads_client.get_advertiser_duns_mapping()
+    except Exception as exc:
+        raise _translate(exc) from exc
+
+
+@app.get(
+    '/advertisers/{advertiser_id}/stats',
+    responses={404: {'model': ErrorResponse}, 502: {'model': ErrorResponse}},
+)
+async def get_advertiser_stats(
+    advertiser_id: str,
+    pages: int = Query(3, ge=1, le=20, description='Pages of creatives to sample (1-20, default 3)'),
+):
+    '''Sample an advertiser creative pages and return format breakdown, top domains, date range, and trend.'''
+    import collections
+    adv = await app.state.ads_client.get_advertiser(advertiser_id)
+    if adv is None:
+        raise HTTPException(status_code=404, detail='Advertiser not found')
+    
+    format_counts: dict[int, int] = {}
+    domains: dict[str, int] = {}
+    monthly: dict[str, int] = {}
+    earliest = None
+    latest = None
+    total_count = None
+    sampled = 0
+    region_total = 0
+    region_items = 0
+    cursor = None
+    
+    for _ in range(pages):
+        try:
+            page = await app.state.ads_client.list_creatives(advertiser_id=advertiser_id, cursor=cursor)
+        except Exception as exc:
+            raise _translate(exc) from exc
+        if total_count is None:
+            total_count = page.total_count
+        for c in page.creatives:
+            sampled += 1
+            ft = c.format_type or 0
+            format_counts[ft] = format_counts.get(ft, 0) + 1
+            if c.domain:
+                domains[c.domain] = domains.get(c.domain, 0) + 1
+            if c.region_count is not None:
+                region_total += c.region_count
+                region_items += 1
+            if c.last_shown and c.last_shown.seconds:
+                dt = c.last_shown.to_datetime()
+                if dt:
+                    key = dt.strftime('%Y-%m')
+                    monthly[key] = monthly.get(key, 0) + 1
+                    if latest is None or dt > latest:
+                        latest = dt
+            if c.first_shown and c.first_shown.seconds:
+                dt = c.first_shown.to_datetime()
+                if dt and (earliest is None or dt < earliest):
+                    earliest = dt
+        if not page.next_cursor:
+            break
+        cursor = page.next_cursor
+    
+    FORMAT_NAMES = {1: 'Display', 2: 'Video', 3: 'Search', 0: 'Unknown'}
+    sorted_months = sorted(monthly)
+    if len(sorted_months) >= 6:
+        third = max(1, len(sorted_months) // 3)
+        early = sum(monthly[m] for m in sorted_months[:third]) / third
+        late = sum(monthly[m] for m in sorted_months[-third:]) / third
+        trend = 'increasing' if late > early * 1.2 else 'decreasing' if late < early * 0.8 else 'stable'
+    else:
+        trend = 'unknown'
+    
+    return {
+        'advertiser_id': adv.advertiser_id,
+        'name': adv.name,
+        'country_code': adv.country_code,
+        'total_count': total_count,
+        'sampled': sampled,
+        'pages_fetched': pages,
+        'format_breakdown': {FORMAT_NAMES.get(k, 'Unknown'): v for k, v in format_counts.items() if v},
+        'top_domains': dict(sorted(domains.items(), key=lambda x: -x[1])[:10]),
+        'avg_region_count': round(region_total / region_items, 1) if region_items else None,
+        'earliest_first_shown': earliest.isoformat() if earliest else None,
+        'latest_last_shown': latest.isoformat() if latest else None,
+        'activity_trend': trend,
+        'peak_months': sorted(monthly, key=lambda m: -monthly[m])[:3],
+    }

@@ -3,6 +3,7 @@ captures/
 __pycache__/
 *.pyc
 .env
+ads-transparency.toml
 *.db
 .pytest_cache/
 dist/

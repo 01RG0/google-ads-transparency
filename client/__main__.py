@@ -456,6 +456,11 @@ def _config_init(args: argparse.Namespace) -> None:
         print(f"Created {env_path}")
     else:
         print(f"Already exists: {env_path}")
+    if not getattr(args, "global_", False):
+        print()
+        print("⚠  Add these lines to .gitignore so you never commit secrets:")
+        print("   ads-transparency.toml")
+        print("   .env")
 
 
 def _config_show() -> None:

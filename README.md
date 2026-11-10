@@ -1,11 +1,11 @@
-# 🔍 ads-transparency-client
+# 🔍 google-ads-transparency
 
 <p align="center">
-  <a href="https://github.com/01RG0/google-ads/actions/workflows/ci.yml">
-    <img src="https://github.com/01RG0/google-ads/actions/workflows/ci.yml/badge.svg" alt="CI">
+  <a href="https://github.com/01RG0/google-ads-transparency/actions/workflows/ci.yml">
+    <img src="https://github.com/01RG0/google-ads-transparency/actions/workflows/ci.yml/badge.svg" alt="CI">
   </a>
-  <a href="https://github.com/01RG0/google-ads/actions/workflows/daily-smoke.yml">
-    <img src="https://github.com/01RG0/google-ads/actions/workflows/daily-smoke.yml/badge.svg" alt="Daily Smoke">
+  <a href="https://github.com/01RG0/google-ads-transparency/actions/workflows/daily-smoke.yml">
+    <img src="https://github.com/01RG0/google-ads-transparency/actions/workflows/daily-smoke.yml/badge.svg" alt="Daily Smoke">
   </a>
   <img src="https://img.shields.io/badge/python-3.11%2B-blue" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="Apache 2.0 License">
@@ -13,7 +13,8 @@
 </p>
 
 <p align="center">
-  Typed async Python client for the <strong>Google Ads Transparency Center</strong> — the public database of every ad running on Google Search, YouTube, Shopping, Maps, and Play.<br>
+  <strong>Reverse-engineer your competitors' Google ad strategy.</strong><br>
+  Built on the public Ads Transparency Center — every ad on Google Search, YouTube, Shopping, Maps, and Play.<br>
   No authentication. No browser. Pure <code>httpx</code>.
 </p>
 
