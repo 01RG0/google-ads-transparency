@@ -8,7 +8,7 @@
     <img src="https://github.com/01RG0/google-ads/actions/workflows/daily-smoke.yml/badge.svg" alt="Daily Smoke">
   </a>
   <img src="https://img.shields.io/badge/python-3.11%2B-blue" alt="Python 3.11+">
-  <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License">
+  <img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="Apache 2.0 License">
   <img src="https://img.shields.io/badge/no%20auth-public%20API-brightgreen" alt="No Auth">
 </p>
 
@@ -374,7 +374,7 @@ ads-transparency-client/
 
 ## 📄 License
 
-[MIT](LICENSE) — free to use, modify, and distribute.
+[Apache 2.0](LICENSE) — free to use, modify, and distribute, including commercially. Includes **explicit patent protection** — contributors cannot later sue you for patent infringement over code they contributed.
 
 ---
 
