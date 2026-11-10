@@ -9,29 +9,66 @@ PROVIDERS: dict[str, dict[str, str | None]] = {
     "groq": {
         "base_url": "https://api.groq.com/openai/v1",
         "env_var": "GROQ_API_KEY",
-        "default_model": "openai/gpt-oss-120b",
+        "default_model": None,  # auto-detected at runtime
     },
     "openai": {
         "base_url": "https://api.openai.com/v1",
         "env_var": "OPENAI_API_KEY",
-        "default_model": "gpt-4o-mini",
+        "default_model": None,
     },
     "together": {
         "base_url": "https://api.together.xyz/v1",
         "env_var": "TOGETHER_API_KEY",
-        "default_model": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+        "default_model": None,
     },
     "ollama": {
         "base_url": "http://localhost:11434/v1",
         "env_var": None,
-        "default_model": "llama3.2",
+        "default_model": None,
     },
     "anthropic": {
         "base_url": None,
         "env_var": "ANTHROPIC_API_KEY",
-        "default_model": "claude-haiku-5-5",
+        "default_model": None,
     },
 }
+
+# Anthropic models endpoint is different — handled separately
+_ANTHROPIC_MODELS_URL = "https://api.anthropic.com/v1/models"
+
+
+async def _fetch_first_model(base_url: str, api_key: str | None, provider: str) -> str:
+    """Fetch the first available model from the provider's /models endpoint."""
+    if provider == "anthropic":
+        url = _ANTHROPIC_MODELS_URL
+        headers = {"x-api-key": api_key or "", "anthropic-version": "2023-06-01"}
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(url, headers=headers, timeout=10.0)
+        if resp.status_code != 200:
+            raise RuntimeError(f"Could not fetch Anthropic models (HTTP {resp.status_code}). Pass --model explicitly.")
+        data = resp.json()
+        models = [m["id"] for m in data.get("data", [])]
+    else:
+        url = f"{base_url}/models"
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(url, headers=headers, timeout=10.0)
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"Could not auto-detect model for {provider} (HTTP {resp.status_code}). "
+                "Pass --model explicitly."
+            )
+        data = resp.json()
+        models = [m["id"] for m in data.get("data", [])]
+
+    # filter out non-text models (embeddings, whisper, guard, tts, etc.)
+    _skip = ("whisper", "embed", "guard", "tts", "vision", "image", "speech",
+             "safeguard", "prompt-guard", "orpheus", "allam")
+    text_models = [m for m in models if not any(s in m.lower() for s in _skip)]
+    chosen = text_models[0] if text_models else (models[0] if models else None)
+    if chosen is None:
+        raise RuntimeError(f"No models found for {provider}. Pass --model explicitly.")
+    return chosen
 
 
 def list_providers() -> list[str]:
@@ -63,7 +100,10 @@ async def ai_complete(
 
     resolved_model = model or os.environ.get("AI_MODEL") or provider_info["default_model"]
     if resolved_model is None:
-        raise ValueError(f"No model configured for provider {provider!r}")
+        # auto-detect from the provider's /models endpoint
+        resolved_model = await _fetch_first_model(
+            resolved_base_url, resolved_api_key, provider_lower
+        )
 
     env_var = provider_info["env_var"]
     resolved_api_key = api_key
