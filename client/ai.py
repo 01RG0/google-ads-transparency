@@ -9,7 +9,7 @@ PROVIDERS: dict[str, dict[str, str | None]] = {
     "groq": {
         "base_url": "https://api.groq.com/openai/v1",
         "env_var": "GROQ_API_KEY",
-        "default_model": "llama-3.3-70b-versatile",
+        "default_model": "openai/gpt-oss-120b",
     },
     "openai": {
         "base_url": "https://api.openai.com/v1",

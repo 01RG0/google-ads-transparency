@@ -476,6 +476,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 await _download_previews(client, args)
 
     try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
         asyncio.run(_run())
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr)
