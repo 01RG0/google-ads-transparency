@@ -37,3 +37,13 @@ def lookup_country_geo_target(region: str) -> int | None:
     if code is not None:
         return COUNTRY_GEO_TARGET_IDS[code]
     return None
+
+
+SUPPORTED_REGIONS: list[str] = sorted(
+    set(COUNTRY_GEO_TARGET_IDS.keys()) |
+    {name.title() for name in COUNTRY_NAME_TO_CODE.keys()}
+)
+
+
+def list_regions() -> list[str]:
+    return SUPPORTED_REGIONS

@@ -23,14 +23,28 @@ class TransparencyClient:
     RETRY_STATUSES = {429, 500, 502, 503, 504}
 
     def __init__(self, *, timeout: float = 20, min_interval: float = 0.25,
-                 max_retries: int = 3, client: httpx.AsyncClient | None = None) -> None:
-        self._http = client or httpx.AsyncClient(timeout=timeout, headers={
+                 max_retries: int = 3, client: httpx.AsyncClient | None = None,
+                 proxy: str | None = None, proxies: list[str] | None = None) -> None:
+        self._timeout_val = timeout
+        self._base_headers = {
             "content-type": "application/x-www-form-urlencoded",
             "origin": "https://adstransparency.google.com",
             "referer": "https://adstransparency.google.com/",
             "x-same-domain": "1",
-        })
-        self._owns_client = client is None
+        }
+        self._proxies: list[str] | None = None
+
+        if proxies:
+            self._proxies = list(proxies)
+            self._http = client or httpx.AsyncClient(timeout=timeout, headers=self._base_headers)
+            self._owns_client = client is None
+        elif proxy:
+            self._http = client or httpx.AsyncClient(timeout=timeout, proxy=proxy, headers=self._base_headers)
+            self._owns_client = client is None
+        else:
+            self._http = client or httpx.AsyncClient(timeout=timeout, headers=self._base_headers)
+            self._owns_client = client is None
+
         self.min_interval = max(0.0, min_interval)
         self.max_retries = max(0, max_retries)
         self._rate_lock = asyncio.Lock()
@@ -56,10 +70,19 @@ class TransparencyClient:
     async def _rpc(self, service_method: str, payload: dict[str, Any]) -> dict[str, Any]:
         url = self.BASE_URL + service_method + "?authuser="
         body = "f.req=" + quote_plus(json.dumps(payload, separators=(",", ":")))
+
+        if self._proxies:
+            proxy = random.choice(self._proxies)
+            async with httpx.AsyncClient(timeout=self._timeout_val, proxy=proxy, headers=self._base_headers) as http:
+                return await self._rpc_with_client(http, url, body)
+        else:
+            return await self._rpc_with_client(self._http, url, body)
+
+    async def _rpc_with_client(self, http: httpx.AsyncClient, url: str, body: str) -> dict[str, Any]:
         for attempt in range(self.max_retries + 1):
             await self._throttle()
             try:
-                response = await self._http.post(url, content=body)
+                response = await http.post(url, content=body)
             except httpx.TransportError as exc:
                 if attempt >= self.max_retries:
                     raise UpstreamHTTPError(f"RPC transport failed: {exc.__class__.__name__}") from exc
@@ -89,23 +112,24 @@ class TransparencyClient:
         try:
             return model.model_validate(value)
         except (ValidationError, TypeError) as exc:
-            raise ResponseShapeError(f"Unexpected response shape from {endpoint}") from exc
+            keys = list(value.keys()) if isinstance(value, dict) else type(value).__name__
+            raise ResponseShapeError(f"Unexpected response shape from {endpoint}: got keys {keys}") from exc
 
     async def search_advertisers(self, query: str, *, limit: int = 10) -> list[AdvertiserSuggestion]:
         data = await self._rpc("SearchService/SearchSuggestions", {"1": query, "2": limit, "3": limit, "5": {"1": 1}})
         rows = data.get("1")
         if not isinstance(rows, list):
-            raise ResponseShapeError("SearchSuggestions response is missing list field '1'")
+            raise ResponseShapeError(f"SearchSuggestions response missing list field '1'; got keys {list(data.keys())}")
         results = []
         for row in rows:
             if not isinstance(row, dict):
-                raise ResponseShapeError("SearchSuggestions item is missing object field '1'")
+                raise ResponseShapeError(f"SearchSuggestions item missing object field '1'; got {type(row).__name__}")
             if isinstance(row.get("1"), dict):
                 inner = row["1"]
             elif isinstance(row.get("2"), str):
                 inner = row
             else:
-                raise ResponseShapeError("SearchSuggestions item is missing object field '1'")
+                raise ResponseShapeError(f"SearchSuggestions item missing object field '1'; got keys {list(row.keys())}")
             results.append(AdvertiserSuggestion.model_validate({**inner, "raw": inner}))
         return results
 
@@ -114,7 +138,7 @@ class TransparencyClient:
         if not data:
             return None
         if not isinstance(data.get("1"), dict):
-            raise ResponseShapeError("GetAdvertiserById response is missing object field '1'")
+            raise ResponseShapeError(f"GetAdvertiserById response missing object field '1'; got keys {list(data.keys())}")
         return self._model(Advertiser, data["1"], "GetAdvertiserById")
 
     async def list_creatives(self, advertiser_id: str | None = None, region: str | None = None,
@@ -155,7 +179,7 @@ class TransparencyClient:
             payload["4"] = cursor
         data = await self._rpc("SearchService/SearchCreatives", payload)
         if not isinstance(data.get("1"), list):
-            raise ResponseShapeError("SearchCreatives response is missing list field '1'")
+            raise ResponseShapeError(f"SearchCreatives response missing list field '1'; got keys {list(data.keys())}")
         return self._model(CreativePage, data, "SearchCreatives")
 
     async def paginate(self, advertiser_id=None, region=None, date_from=None, date_to=None, *, domain=None, page_size=40) -> AsyncGenerator[Creative, None]:
@@ -176,7 +200,7 @@ class TransparencyClient:
         data = await self._rpc("TfaarAdvertiserService/GetAdvertiserDunsMapping", {})
         rows = data.get("1")
         if not isinstance(rows, list):
-            raise ResponseShapeError("GetAdvertiserDunsMapping response is missing list field '1'")
+            raise ResponseShapeError(f"GetAdvertiserDunsMapping response missing list field '1'; got keys {list(data.keys())}")
         return [self._model(DunsMappingEntry, row, "GetAdvertiserDunsMapping") for row in rows]
 
     async def get_creative(self, advertiser_id: str, creative_id: str) -> CreativeDetail | None:
@@ -188,5 +212,5 @@ class TransparencyClient:
         if not data:
             return None
         if not isinstance(data.get("1"), dict):
-            raise ResponseShapeError("GetCreativeById response is missing object field '1'")
+            raise ResponseShapeError(f"GetCreativeById response missing object field '1'; got keys {list(data.keys())}")
         return self._model(CreativeDetail, data["1"], "GetCreativeById")
