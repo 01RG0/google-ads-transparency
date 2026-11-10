@@ -2,7 +2,7 @@
 from __future__ import annotations
 from datetime import datetime, timezone
 
-from typing import Any
+from typing import Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
@@ -25,6 +25,14 @@ class Advertiser(RPCModel):
     advertiser_id: str = Field(alias="1", description="Unique advertiser ID starting with AR")
     name: str | None = Field(default=None, alias="2", description="Advertiser display name")
     country_code: str | None = Field(default=None, alias="3", description="ISO 3166-1 alpha-2 country code")
+    platform_type_ids: list[int] = Field(default_factory=list, alias="15", description="Platform type IDs: 1=Search, 2=YouTube, 3=Display/Shopping, 4=Maps, 5=Play")
+
+    _PLATFORM_NAMES: ClassVar[dict[int, str]] = {1: "Search", 2: "YouTube", 3: "Display/Shopping", 4: "Maps", 5: "Play"}
+
+    @computed_field
+    @property
+    def platform_names(self) -> list[str]:
+        return [self._PLATFORM_NAMES.get(i, f"Unknown({i})") for i in self.platform_type_ids]
 
     @computed_field
     @property

@@ -24,7 +24,8 @@ class TransparencyClient:
 
     def __init__(self, *, timeout: float = 20, min_interval: float = 0.25,
                  max_retries: int = 3, client: httpx.AsyncClient | None = None,
-                 proxy: str | None = None, proxies: list[str] | None = None) -> None:
+                 proxy: str | None = None, proxies: list[str] | None = None,
+                 verbose: bool = False) -> None:
         self._timeout_val = timeout
         self._base_headers = {
             "content-type": "application/x-www-form-urlencoded",
@@ -47,6 +48,7 @@ class TransparencyClient:
 
         self.min_interval = max(0.0, min_interval)
         self.max_retries = max(0, max_retries)
+        self.verbose = verbose
         self._rate_lock = asyncio.Lock()
         self._last_request = 0.0
 
@@ -64,6 +66,8 @@ class TransparencyClient:
         async with self._rate_lock:
             delay = self.min_interval - (time.monotonic() - self._last_request)
             if delay > 0:
+                if self.verbose:
+                    print(f"[verbose] rate-limiting: sleeping {delay:.2f}s", flush=True)
                 await asyncio.sleep(delay)
             self._last_request = time.monotonic()
 
@@ -86,7 +90,10 @@ class TransparencyClient:
             except httpx.TransportError as exc:
                 if attempt >= self.max_retries:
                     raise UpstreamHTTPError(f"RPC transport failed: {exc.__class__.__name__}") from exc
-                await asyncio.sleep(min(8.0, 0.5 * 2**attempt) + random.uniform(0, 0.25))
+                sleep = min(8.0, 0.5 * 2**attempt) + random.uniform(0, 0.25)
+                if self.verbose:
+                    print(f"[verbose] transport error ({exc.__class__.__name__}), retry {attempt+1}/{self.max_retries}, sleeping {sleep:.1f}s", flush=True)
+                await asyncio.sleep(sleep)
                 continue
             if response.status_code in self.RETRY_STATUSES and attempt < self.max_retries:
                 retry_after = response.headers.get("retry-after")
@@ -94,7 +101,10 @@ class TransparencyClient:
                     delay = float(retry_after) if retry_after else 0.5 * 2**attempt
                 except ValueError:
                     delay = 0.5 * 2**attempt
-                await asyncio.sleep(min(15.0, delay) + random.uniform(0, 0.25))
+                sleep = min(15.0, delay) + random.uniform(0, 0.25)
+                if self.verbose:
+                    print(f"[verbose] HTTP {response.status_code}, retry {attempt+1}/{self.max_retries}, sleeping {sleep:.1f}s", flush=True)
+                await asyncio.sleep(sleep)
                 continue
             if response.status_code >= 400:
                 raise UpstreamHTTPError(f"RPC returned HTTP {response.status_code}")

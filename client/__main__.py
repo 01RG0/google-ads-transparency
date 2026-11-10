@@ -18,6 +18,18 @@ from .ai import ai_complete, list_providers
 from .client import TransparencyClient
 from .config import get as _cfg, get_config, write_sample_config, write_sample_env
 from .errors import TransparencyError
+from .storage import DEFAULT_DB, db_stats, init_db, save_advertisers, save_creatives
+
+try:
+    from colorama import Fore, Style, init as _colorama_init
+    _colorama_init(autoreset=True)
+    _HAS_COLOR = True
+except ImportError:
+    _HAS_COLOR = False
+    class Fore:  # type: ignore[no-redef]
+        CYAN = GREEN = YELLOW = RED = RESET = ""
+    class Style:  # type: ignore[no-redef]
+        BRIGHT = RESET_ALL = ""
 
 
 def _field(value: object | None) -> str:
@@ -32,8 +44,8 @@ def _print_table(columns: list[str], rows: list[list[str]]) -> None:
                 widths[i] = len(cell)
     header = "  ".join(col.upper().ljust(widths[i]) for i, col in enumerate(columns))
     separator = "  ".join("-" * widths[i] for i in range(len(columns)))
-    print(header)
-    print(separator)
+    print(f"{Fore.CYAN}{Style.BRIGHT}{header}{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}{separator}{Style.RESET_ALL}")
     for row in rows:
         print("  ".join(row[i].ljust(widths[i]) for i in range(len(columns))))
 
@@ -81,13 +93,26 @@ def _output(columns: list[str], rows: list[list[str]], fmt: str, output_file: st
 async def _search_advertisers(client: TransparencyClient, args: argparse.Namespace) -> None:
     results = await client.search_advertisers(args.query, limit=args.limit)
     links = getattr(args, "links", False)
-    columns = ["advertiser_id", "name", "country_code"] + (["transparency_url"] if links else [])
-    rows = [
-        [_field(r.advertiser_id), _field(r.name), _field(r.country_code)]
-        + ([_field(r.transparency_url)] if links else [])
-        for r in results
-    ]
+    show_counts = any(r.ad_count_lower or r.ad_count_upper for r in results)
+    columns = ["advertiser_id", "name", "country_code"]
+    if show_counts:
+        columns.append("ad_count_range")
+    if links:
+        columns.append("transparency_url")
+    rows = []
+    for r in results:
+        row = [_field(r.advertiser_id), _field(r.name), _field(r.country_code)]
+        if show_counts:
+            lo, hi = r.ad_count_lower or "", r.ad_count_upper or ""
+            row.append(f"{lo}-{hi}" if lo or hi else "")
+        if links:
+            row.append(_field(r.transparency_url))
+        rows.append(row)
     _output(columns, rows, args.format, args.output)
+    if getattr(args, "save", None):
+        conn = init_db(Path(args.save))
+        n = save_advertisers(conn, results, source="search-advertisers")
+        print(f"Saved {n} advertisers to {args.save}", file=sys.stderr)
 
 
 async def _list_creatives(client: TransparencyClient, args: argparse.Namespace) -> None:
@@ -95,7 +120,10 @@ async def _list_creatives(client: TransparencyClient, args: argparse.Namespace) 
     columns = ["creative_id", "advertiser_id", "format_type", "domain"] + (
         ["transparency_url", "domain_url"] if links else []
     )
+    # --since is a shortcut for --from with no --to (uses today implicitly via API)
+    date_from = args.date_from or getattr(args, "since", None)
     rows: list[list[str]] = []
+    all_creatives = []
     cursor: str | None = None
     all_pages: bool = getattr(args, "all_pages", False)
     max_pages: int = 999_999 if all_pages else args.pages
@@ -107,11 +135,12 @@ async def _list_creatives(client: TransparencyClient, args: argparse.Namespace) 
         page = await client.list_creatives(
             advertiser_id=args.advertiser,
             region=args.region,
-            date_from=args.date_from,
+            date_from=date_from,
             date_to=args.date_to,
             cursor=cursor,
             domain=args.domain,
         )
+        all_creatives.extend(page.creatives)
         for creative in page.creatives:
             row = [
                 _field(creative.creative_id),
@@ -126,6 +155,10 @@ async def _list_creatives(client: TransparencyClient, args: argparse.Namespace) 
             break
         cursor = page.next_cursor
     _output(columns, rows, args.format, args.output)
+    if getattr(args, "save", None):
+        conn = init_db(Path(args.save))
+        n = save_creatives(conn, all_creatives, source="list-creatives")
+        print(f"Saved {n} creatives to {args.save}", file=sys.stderr)
 
 
 async def _get_advertiser(client: TransparencyClient, args: argparse.Namespace) -> None:
@@ -190,6 +223,7 @@ async def _collect_stats(client: TransparencyClient, advertiser_id: str, pages: 
     sampled = 0
     region_total = 0
     region_items = 0
+    lifespans: list[float] = []
     cursor: str | None = None
     for _ in range(pages):
         page = await client.list_creatives(advertiser_id=advertiser_id, cursor=cursor)
@@ -203,15 +237,16 @@ async def _collect_stats(client: TransparencyClient, advertiser_id: str, pages: 
             if c.region_count is not None:
                 region_total += c.region_count
                 region_items += 1
-            if c.first_shown and c.first_shown.seconds:
-                dt = c.first_shown.to_datetime()
-                if dt and (earliest is None or dt < earliest):
-                    earliest = dt
-            if c.last_shown and c.last_shown.seconds:
-                dt = c.last_shown.to_datetime()
-                if dt and (latest is None or dt > latest):
-                    latest = dt
-                    monthly[dt.strftime("%Y-%m")] += 1
+            first_dt = c.first_shown.to_datetime() if c.first_shown and c.first_shown.seconds else None
+            last_dt = c.last_shown.to_datetime() if c.last_shown and c.last_shown.seconds else None
+            if first_dt and (earliest is None or first_dt < earliest):
+                earliest = first_dt
+            if last_dt:
+                if latest is None or last_dt > latest:
+                    latest = last_dt
+                monthly[last_dt.strftime("%Y-%m")] += 1
+            if first_dt and last_dt and last_dt >= first_dt:
+                lifespans.append((last_dt - first_dt).days)
         if not page.next_cursor:
             break
         cursor = page.next_cursor
@@ -225,7 +260,9 @@ async def _collect_stats(client: TransparencyClient, advertiser_id: str, pages: 
         trend = "increasing" if late > early * 1.2 else "decreasing" if late < early * 0.8 else "stable"
     else:
         trend = "unknown (insufficient sample)"
-    return total_count, format_counts, domains, sampled, earliest, latest, monthly, avg_region, trend
+    avg_lifespan = sum(lifespans) / len(lifespans) if lifespans else None
+    max_lifespan = max(lifespans) if lifespans else None
+    return total_count, format_counts, domains, sampled, earliest, latest, monthly, avg_region, trend, avg_lifespan, max_lifespan
 
 
 async def _advertiser_stats(client: TransparencyClient, args: argparse.Namespace) -> None:
@@ -233,7 +270,7 @@ async def _advertiser_stats(client: TransparencyClient, args: argparse.Namespace
     if adv is None:
         print("Advertiser not found", file=sys.stderr)
         return
-    total_count, fc, domains, sampled, earliest, latest, monthly, avg_region, trend = \
+    total_count, fc, domains, sampled, earliest, latest, monthly, avg_region, trend, avg_life, max_life = \
         await _collect_stats(client, args.advertiser_id, args.pages)
     fmt_dt = lambda dt: dt.strftime("%Y-%m-%d") if dt else "-"
     print(f"Advertiser:      {adv.name} ({adv.advertiser_id})")
@@ -243,6 +280,8 @@ async def _advertiser_stats(client: TransparencyClient, args: argparse.Namespace
     if avg_region:
         print(f"Avg regions/ad:  {avg_region:.0f}")
     print(f"Activity trend:  {trend}")
+    if avg_life is not None:
+        print(f"Avg ad lifespan: {avg_life:.0f} days (max: {max_life:.0f} days)")
     print()
     print("Format breakdown:")
     for ft, name in _FORMAT_NAMES.items():
@@ -307,7 +346,7 @@ async def _summarize_advertiser(client: TransparencyClient, args: argparse.Names
     if adv is None:
         print("Advertiser not found", file=sys.stderr)
         return
-    total_count, fc, domains, sampled, earliest, latest, monthly, avg_region, trend = \
+    total_count, fc, domains, sampled, earliest, latest, monthly, avg_region, trend, *_ = \
         await _collect_stats(client, args.advertiser_id, args.pages)
     fmt_dt = lambda dt: dt.strftime("%Y-%m-%d") if dt else "unknown"
     peak_months = sorted(monthly, key=monthly.get, reverse=True)[:3] if monthly else []
@@ -355,8 +394,8 @@ async def _smart_compare(client: TransparencyClient, args: argparse.Namespace) -
     adv2 = await client.get_advertiser(args.id2)
     r1 = await _collect_stats(client, args.id1, args.pages)
     r2 = await _collect_stats(client, args.id2, args.pages)
-    tc1, fc1, dom1, s1, e1, l1, mo1, ar1, tr1 = r1
-    tc2, fc2, dom2, s2, e2, l2, mo2, ar2, tr2 = r2
+    tc1, fc1, dom1, s1, e1, l1, mo1, ar1, tr1, *_ = r1
+    tc2, fc2, dom2, s2, e2, l2, mo2, ar2, tr2, *_ = r2
     fmt_dt = lambda dt: dt.strftime("%Y-%m-%d") if dt else "unknown"
 
     def _block(adv, aid, tc, fc, dom, s, e, l, ar, tr) -> str:
@@ -459,6 +498,29 @@ async def _suggest_keywords(client: TransparencyClient, args: argparse.Namespace
                             api_key=args.api_key, base_url=args.base_url))
 
 
+async def _market_share(client: TransparencyClient, args: argparse.Namespace) -> None:
+    names, totals, fcs, samples = [], [], [], []
+    for aid in args.ids:
+        adv = await client.get_advertiser(aid)
+        tc, fc, _, s, *_ = await _collect_stats(client, aid, args.pages)
+        names.append((adv.name if adv else aid) or aid)
+        totals.append(tc or "?")
+        fcs.append(fc)
+        samples.append(s)
+    w = max(len(n) for n in names)
+    header = f"{'Metric':<20}  " + "  ".join(f"{n[:w]:<{w}}" for n in names)
+    print(f"{Fore.CYAN}{Style.BRIGHT}{header}{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}{'-' * len(header)}{Style.RESET_ALL}")
+    print(f"{'Total ads':<20}  " + "  ".join(f"{str(t):<{w}}" for t in totals))
+    for ft, name in _FORMAT_NAMES.items():
+        row_vals = []
+        for fc, s in zip(fcs, samples):
+            pct = f"{round(100 * fc.get(ft, 0) / s)}%" if s else "-"
+            row_vals.append(f"{pct:<{w}}")
+        if any(fc.get(ft, 0) for fc in fcs):
+            print(f"{name + ' %':<20}  " + "  ".join(row_vals))
+
+
 def _config_init(args: argparse.Namespace) -> None:
     target = Path.home() / ".config" / "ads-transparency" if getattr(args, "global_", False) else Path(".")
     target.mkdir(parents=True, exist_ok=True)
@@ -511,6 +573,7 @@ async def _download_previews(client: TransparencyClient, args: argparse.Namespac
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="client", description="CLI for the ads-transparency-client package")
+    parser.add_argument("--verbose", action="store_true", help="Show rate-limiting and retry details")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     fmt_help = "Output format: table (default), json, csv, or xlsx"
@@ -520,9 +583,10 @@ def build_parser() -> argparse.ArgumentParser:
     search = subparsers.add_parser("search-advertisers", help="Search advertisers by query")
     search.add_argument("query", help="Advertiser search query")
     search.add_argument("--limit", type=int, default=10, help="Maximum results (default 10)")
+    search.add_argument("--links", action="store_true", help="Add Transparency Center URL column")
+    search.add_argument("--save", metavar="FILE", default=None, help="Save to SQLite DB (e.g. ads.db)")
     search.add_argument("--format", choices=fmt_choices, default="table", help=fmt_help)
     search.add_argument("--output", default="output.xlsx", help="Output file for xlsx format")
-    search.add_argument("--links", action="store_true", help="Add Transparency Center URL column")
 
     # list-creatives
     creatives = subparsers.add_parser("list-creatives", help="List creatives with optional filters")
@@ -531,10 +595,12 @@ def build_parser() -> argparse.ArgumentParser:
     creatives.add_argument("--region", help="Region filter (ISO alpha-2 or country name)")
     creatives.add_argument("--from", dest="date_from", help="Start date (YYYY-MM-DD)")
     creatives.add_argument("--to", dest="date_to", help="End date (YYYY-MM-DD)")
-    creatives.add_argument("--pages", type=int, default=1, help="Max pages to paginate (default 1)")
+    creatives.add_argument("--since", dest="since", default=None, help="Shortcut for --from (show ads since this date)")
+    creatives.add_argument("--pages", type=int, default=_cfg("cli", "pages", 1), help="Max pages to paginate")
     creatives.add_argument("--all-pages", dest="all_pages", action="store_true", help="Fetch all pages (overrides --pages)")
     creatives.add_argument("--links", action="store_true", help="Add Transparency Center URL and domain URL columns")
-    creatives.add_argument("--format", choices=fmt_choices, default="table", help=fmt_help)
+    creatives.add_argument("--save", metavar="FILE", default=None, help="Save to SQLite DB (e.g. ads.db)")
+    creatives.add_argument("--format", choices=fmt_choices, default=_cfg("cli", "format", "table"), help=fmt_help)
     creatives.add_argument("--output", default="output.xlsx", help="Output file for xlsx format")
 
     # get-advertiser
@@ -563,6 +629,11 @@ def build_parser() -> argparse.ArgumentParser:
     stats = subparsers.add_parser("advertiser-stats", help="Show statistics for an advertiser")
     stats.add_argument("advertiser_id", help="Advertiser ID (AR...)")
     stats.add_argument("--pages", type=int, default=3, help="Pages to sample (default 3)")
+
+    # market-share
+    ms = subparsers.add_parser("market-share", help="Compare total ad volume and format mix for multiple advertisers")
+    ms.add_argument("ids", nargs="+", help="2-5 advertiser IDs to compare")
+    ms.add_argument("--pages", type=int, default=2, help="Pages to sample per advertiser (default 2)")
 
     # compare-advertisers
     cmp = subparsers.add_parser("compare-advertisers", help="Compare two advertisers side by side")
@@ -626,7 +697,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     async def _run() -> None:
         async with TransparencyClient(
-            timeout=_timeout, min_interval=_interval, max_retries=_retries, proxy=_proxy
+            timeout=_timeout, min_interval=_interval, max_retries=_retries,
+            proxy=_proxy, verbose=getattr(args, "verbose", False),
         ) as client:
             if args.command == "search-advertisers":
                 await _search_advertisers(client, args)
@@ -640,6 +712,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 await _discover_competitors(client, args)
             elif args.command == "advertiser-stats":
                 await _advertiser_stats(client, args)
+            elif args.command == "market-share":
+                await _market_share(client, args)
             elif args.command == "compare-advertisers":
                 await _compare_advertisers(client, args)
             elif args.command == "summarize-advertiser":

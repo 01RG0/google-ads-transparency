@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
 
@@ -29,21 +30,23 @@ async def download_previews(
             advertiser_id=advertiser_id, cursor=cursor, page_size=40
         )
 
-        for creative in page.creatives:
-            if count >= limit:
-                break
+        remaining = limit - count
+        batch = page.creatives[:remaining]
 
-            try:
-                detail = await client.get_creative(
-                    creative.advertiser_id, creative.creative_id
-                )
-            except Exception as exc:
+        results = await asyncio.gather(
+            *[client.get_creative(c.advertiser_id, c.creative_id) for c in batch],
+            return_exceptions=True,
+        )
+
+        for creative, result in zip(batch, results):
+            if isinstance(result, Exception):
                 print(
-                    f'warning: get_creative failed for {creative.creative_id}: {exc}',
+                    f'warning: get_creative failed for {creative.creative_id}: {result}',
                     file=sys.stderr,
                 )
                 continue
 
+            detail = result
             if detail is None:
                 continue
 
