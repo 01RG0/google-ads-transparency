@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
 
 class RPCModel(BaseModel):
@@ -26,12 +26,26 @@ class Advertiser(RPCModel):
     name: str | None = Field(default=None, alias="2", description="Advertiser display name")
     country_code: str | None = Field(default=None, alias="3", description="ISO 3166-1 alpha-2 country code")
 
+    @computed_field
+    @property
+    def transparency_url(self) -> str | None:
+        if self.advertiser_id:
+            return f'https://adstransparency.google.com/?region=anywhere&advertiser={self.advertiser_id}'
+        return None
+
 
 class AdvertiserSuggestion(RPCModel):
     name: str | None = Field(default=None, alias="1")
     advertiser_id: str | None = Field(default=None, alias="2", description="Unique advertiser ID starting with AR")
     country_code: str | None = Field(default=None, alias="3")
     raw: dict[str, Any] = Field(default_factory=dict, exclude=True)
+
+    @computed_field
+    @property
+    def transparency_url(self) -> str | None:
+        if self.advertiser_id:
+            return f'https://adstransparency.google.com/?region=anywhere&advertiser={self.advertiser_id}'
+        return None
     ad_count_lower: str | None = Field(default=None, exclude=True)
     ad_count_upper: str | None = Field(default=None, exclude=True)
 
@@ -76,6 +90,20 @@ class Creative(RPCModel):
     region_count: int | None = Field(default=None, alias="13")
     domain: str | None = Field(default=None, alias="14", description="Advertiser domain")
 
+    @computed_field
+    @property
+    def transparency_url(self) -> str | None:
+        if self.advertiser_id:
+            return f'https://adstransparency.google.com/?region=anywhere&advertiser={self.advertiser_id}'
+        return None
+
+    @computed_field
+    @property
+    def domain_url(self) -> str | None:
+        if self.domain:
+            return f'https://{self.domain}'
+        return None
+
 
 class CreativePage(RPCModel):
     creatives: list[Creative] = Field(default_factory=list, alias="1")
@@ -105,6 +133,21 @@ class CreativeDetail(RPCModel):
     format_type: int | None = Field(default=None, alias="8")
     regions: list[CreativeRegion] = Field(default_factory=list, alias="17")
     advertiser: dict[str, Any] | None = Field(default=None, alias="22")
+
+    @computed_field
+    @property
+    def transparency_url(self) -> str | None:
+        if self.advertiser_id:
+            return f'https://adstransparency.google.com/?region=anywhere&advertiser={self.advertiser_id}'
+        return None
+
+    @computed_field
+    @property
+    def preview_url(self) -> str | None:
+        try:
+            return self.variations[0].content.preview_url
+        except (IndexError, AttributeError):
+            return None
 
 
 class CreativeSearchRequest(BaseModel):

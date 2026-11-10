@@ -80,16 +80,21 @@ def _output(columns: list[str], rows: list[list[str]], fmt: str, output_file: st
 
 async def _search_advertisers(client: TransparencyClient, args: argparse.Namespace) -> None:
     results = await client.search_advertisers(args.query, limit=args.limit)
-    columns = ["advertiser_id", "name", "country_code"]
+    links = getattr(args, "links", False)
+    columns = ["advertiser_id", "name", "country_code"] + (["transparency_url"] if links else [])
     rows = [
         [_field(r.advertiser_id), _field(r.name), _field(r.country_code)]
+        + ([_field(r.transparency_url)] if links else [])
         for r in results
     ]
     _output(columns, rows, args.format, args.output)
 
 
 async def _list_creatives(client: TransparencyClient, args: argparse.Namespace) -> None:
-    columns = ["creative_id", "advertiser_id", "format_type", "domain"]
+    links = getattr(args, "links", False)
+    columns = ["creative_id", "advertiser_id", "format_type", "domain"] + (
+        ["transparency_url", "domain_url"] if links else []
+    )
     rows: list[list[str]] = []
     cursor: str | None = None
     all_pages: bool = getattr(args, "all_pages", False)
@@ -108,12 +113,15 @@ async def _list_creatives(client: TransparencyClient, args: argparse.Namespace) 
             domain=args.domain,
         )
         for creative in page.creatives:
-            rows.append([
+            row = [
                 _field(creative.creative_id),
                 _field(creative.advertiser_id),
                 _field(creative.format_type),
                 _field(creative.domain),
-            ])
+            ]
+            if links:
+                row += [_field(creative.transparency_url), _field(creative.domain_url)]
+            rows.append(row)
         if page.next_cursor is None:
             break
         cursor = page.next_cursor
@@ -124,38 +132,48 @@ async def _get_advertiser(client: TransparencyClient, args: argparse.Namespace) 
     advertiser = await client.get_advertiser(args.advertiser_id)
     if advertiser is None:
         return
-    columns = ["advertiser_id", "name", "country_code"]
-    rows = [[_field(advertiser.advertiser_id), _field(advertiser.name), _field(advertiser.country_code)]]
+    links = getattr(args, "links", False)
+    columns = ["advertiser_id", "name", "country_code"] + (["transparency_url"] if links else [])
+    rows = [[_field(advertiser.advertiser_id), _field(advertiser.name), _field(advertiser.country_code)]
+            + ([_field(advertiser.transparency_url)] if links else [])]
     _output(columns, rows, args.format, args.output)
 
 
 # ── new commands ───────────────────────────────────────────────────────────────
 
 async def _find_advertisers(client: TransparencyClient, args: argparse.Namespace) -> None:
+    links = getattr(args, "links", False)
     seen: set[str] = set()
     rows: list[list[str]] = []
-    columns = ["advertiser_id", "name", "country_code", "matched_keyword"]
+    columns = ["advertiser_id", "name", "country_code", "matched_keyword"] + (["transparency_url"] if links else [])
     for kw in args.keywords:
         results = await client.search_advertisers(kw, limit=args.limit)
         for r in results:
             if r.advertiser_id and r.advertiser_id not in seen:
                 seen.add(r.advertiser_id)
-                rows.append([_field(r.advertiser_id), _field(r.name), _field(r.country_code), kw])
+                row = [_field(r.advertiser_id), _field(r.name), _field(r.country_code), kw]
+                if links:
+                    row.append(_field(r.transparency_url))
+                rows.append(row)
     _output(columns, rows, args.format, args.output)
 
 
 async def _discover_competitors(client: TransparencyClient, args: argparse.Namespace) -> None:
+    links = getattr(args, "links", False)
     page = await client.search_by_domain(args.domain, page_size=40)
     seen: set[str] = set()
     rows: list[list[str]] = []
-    columns = ["advertiser_id", "name", "country_code"]
+    columns = ["advertiser_id", "name", "country_code"] + (["transparency_url"] if links else [])
     for creative in page.creatives:
         aid = creative.advertiser_id
         if aid and aid not in seen:
             seen.add(aid)
             adv = await client.get_advertiser(aid)
             if adv:
-                rows.append([_field(adv.advertiser_id), _field(adv.name), _field(adv.country_code)])
+                row = [_field(adv.advertiser_id), _field(adv.name), _field(adv.country_code)]
+                if links:
+                    row.append(_field(adv.transparency_url))
+                rows.append(row)
     _output(columns, rows, args.format, args.output)
 
 
@@ -504,6 +522,7 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--limit", type=int, default=10, help="Maximum results (default 10)")
     search.add_argument("--format", choices=fmt_choices, default="table", help=fmt_help)
     search.add_argument("--output", default="output.xlsx", help="Output file for xlsx format")
+    search.add_argument("--links", action="store_true", help="Add Transparency Center URL column")
 
     # list-creatives
     creatives = subparsers.add_parser("list-creatives", help="List creatives with optional filters")
@@ -514,12 +533,14 @@ def build_parser() -> argparse.ArgumentParser:
     creatives.add_argument("--to", dest="date_to", help="End date (YYYY-MM-DD)")
     creatives.add_argument("--pages", type=int, default=1, help="Max pages to paginate (default 1)")
     creatives.add_argument("--all-pages", dest="all_pages", action="store_true", help="Fetch all pages (overrides --pages)")
+    creatives.add_argument("--links", action="store_true", help="Add Transparency Center URL and domain URL columns")
     creatives.add_argument("--format", choices=fmt_choices, default="table", help=fmt_help)
     creatives.add_argument("--output", default="output.xlsx", help="Output file for xlsx format")
 
     # get-advertiser
     get = subparsers.add_parser("get-advertiser", help="Get an advertiser by ID")
     get.add_argument("advertiser_id", help="Advertiser ID")
+    get.add_argument("--links", action="store_true", help="Add Transparency Center URL column")
     get.add_argument("--format", choices=fmt_choices, default="table", help=fmt_help)
     get.add_argument("--output", default="output.xlsx", help="Output file for xlsx format")
 
@@ -527,12 +548,14 @@ def build_parser() -> argparse.ArgumentParser:
     find = subparsers.add_parser("find-advertisers", help="Search by multiple keywords, deduplicated")
     find.add_argument("keywords", nargs="+", help="One or more search keywords")
     find.add_argument("--limit", type=int, default=10, help="Results per keyword (default 10)")
+    find.add_argument("--links", action="store_true", help="Add Transparency Center URL column")
     find.add_argument("--format", choices=fmt_choices, default="table", help=fmt_help)
     find.add_argument("--output", default="output.xlsx", help="Output file for xlsx format")
 
     # discover-competitors
     disc = subparsers.add_parser("discover-competitors", help="Find advertisers running ads on a domain")
     disc.add_argument("domain", help="Domain to search (e.g. nike.com)")
+    disc.add_argument("--links", action="store_true", help="Add Transparency Center URL column")
     disc.add_argument("--format", choices=fmt_choices, default="table", help=fmt_help)
     disc.add_argument("--output", default="output.xlsx", help="Output file for xlsx format")
 
