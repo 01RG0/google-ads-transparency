@@ -36,6 +36,43 @@
 
 ---
 
+## 🆚 Why not just use the website?
+
+There are three ways to access Google Ads transparency data. Here is how they compare:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                                                                             │
+│   🌐 Transparency Site    📦 Downloadable DB    ⚡ This Tool               │
+│   adstransparency.google  ads.google.com/       pip install                │
+│                                                                             │
+│   One ad at a time  →     Bulk but stale   →    Live + automated           │
+│   No export         →     CSV, few fields  →    JSON / CSV / Excel         │
+│   No automation     →     Manual download  →    CLI / Python / API         │
+│   No AI             →     No AI            →    6 AI providers built-in    │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+| | 🌐 Transparency Site | 📦 Google DB Download | ⚡ This Tool |
+|---|:---:|:---:|:---:|
+| **Access method** | Browser only | Manual CSV download | Python · CLI · REST API |
+| **Data freshness** | ✅ Live | ❌ Weeks/months old | ✅ Live |
+| **Volume per session** | 1 ad at a time | Bulk (limited fields) | 50 000+ via pagination |
+| **Filters** | Region · Date · Format | Limited | Region · Domain · Advertiser · Date |
+| **Export** | Screenshot / copy-paste | CSV (basic fields) | Table · JSON · CSV · **Excel** |
+| **Automation** | ❌ None | ❌ None | ✅ Cron · scripts · CI pipeline |
+| **Preview images** | View only | ❌ Not included | ✅ Bulk download |
+| **Competitor discovery** | ❌ Manual search | ❌ Not supported | ✅ `discover-competitors` |
+| **AI analysis** | ❌ None | ❌ None | ✅ Groq · OpenAI · Anthropic · Ollama |
+| **Proxy / rate control** | ❌ Browser | ❌ N/A | ✅ Single or rotating proxies |
+| **Setup** | Zero | Manual | `pip install -e .` |
+| **Cost** | Free | Free | Free (self-hosted) |
+
+> **Bottom line:** the website is great for a one-off lookup. The downloadable DB is useful for bulk offline analysis on a snapshot. This tool is for anyone who needs **live data at scale** — monitoring competitors, building dashboards, running research pipelines, or integrating ads data into their own product.
+
+---
+
 ## 🚀 Installation
 
 **Requirements:** Python 3.11+
