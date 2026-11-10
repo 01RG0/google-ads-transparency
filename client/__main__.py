@@ -9,12 +9,14 @@ import asyncio
 import collections
 import csv
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Sequence
 
 from .ai import ai_complete, list_providers
 from .client import TransparencyClient
+from .config import get as _cfg, get_config, write_sample_config, write_sample_env
 from .errors import TransparencyError
 
 
@@ -163,10 +165,13 @@ _FORMAT_NAMES = {1: "Display", 2: "Video", 3: "Search", 0: "Unknown"}
 async def _collect_stats(client: TransparencyClient, advertiser_id: str, pages: int):
     format_counts: collections.Counter[int] = collections.Counter()
     domains: collections.Counter[str] = collections.Counter()
+    monthly: collections.Counter[str] = collections.Counter()
     earliest = None
     latest = None
     total_count = None
     sampled = 0
+    region_total = 0
+    region_items = 0
     cursor: str | None = None
     for _ in range(pages):
         page = await client.list_creatives(advertiser_id=advertiser_id, cursor=cursor)
@@ -177,6 +182,9 @@ async def _collect_stats(client: TransparencyClient, advertiser_id: str, pages: 
             format_counts[c.format_type or 0] += 1
             if c.domain:
                 domains[c.domain] += 1
+            if c.region_count is not None:
+                region_total += c.region_count
+                region_items += 1
             if c.first_shown and c.first_shown.seconds:
                 dt = c.first_shown.to_datetime()
                 if dt and (earliest is None or dt < earliest):
@@ -185,10 +193,21 @@ async def _collect_stats(client: TransparencyClient, advertiser_id: str, pages: 
                 dt = c.last_shown.to_datetime()
                 if dt and (latest is None or dt > latest):
                     latest = dt
+                    monthly[dt.strftime("%Y-%m")] += 1
         if not page.next_cursor:
             break
         cursor = page.next_cursor
-    return total_count, format_counts, domains, sampled, earliest, latest
+    avg_region = region_total / region_items if region_items else 0.0
+    # detect trend from monthly distribution
+    sorted_months = sorted(monthly)
+    if len(sorted_months) >= 6:
+        third = max(1, len(sorted_months) // 3)
+        early = sum(monthly[m] for m in sorted_months[:third]) / third
+        late = sum(monthly[m] for m in sorted_months[-third:]) / third
+        trend = "increasing" if late > early * 1.2 else "decreasing" if late < early * 0.8 else "stable"
+    else:
+        trend = "unknown (insufficient sample)"
+    return total_count, format_counts, domains, sampled, earliest, latest, monthly, avg_region, trend
 
 
 async def _advertiser_stats(client: TransparencyClient, args: argparse.Namespace) -> None:
@@ -196,15 +215,18 @@ async def _advertiser_stats(client: TransparencyClient, args: argparse.Namespace
     if adv is None:
         print("Advertiser not found", file=sys.stderr)
         return
-    total_count, fc, domains, sampled, earliest, latest = await _collect_stats(
-        client, args.advertiser_id, args.pages
-    )
-    print(f"Advertiser:   {adv.name} ({adv.advertiser_id})")
-    print(f"Country:      {adv.country_code or '-'}")
-    print(f"Total ads:    {total_count or 'unknown'}")
-    print(f"Sampled:      {sampled} creatives ({args.pages} page(s))")
+    total_count, fc, domains, sampled, earliest, latest, monthly, avg_region, trend = \
+        await _collect_stats(client, args.advertiser_id, args.pages)
+    fmt_dt = lambda dt: dt.strftime("%Y-%m-%d") if dt else "-"
+    print(f"Advertiser:      {adv.name} ({adv.advertiser_id})")
+    print(f"Country:         {adv.country_code or '-'}")
+    print(f"Total ads:       {total_count or 'unknown'}")
+    print(f"Sampled:         {sampled} creatives ({args.pages} page(s))")
+    if avg_region:
+        print(f"Avg regions/ad:  {avg_region:.0f}")
+    print(f"Activity trend:  {trend}")
     print()
-    print("Format breakdown (from sample):")
+    print("Format breakdown:")
     for ft, name in _FORMAT_NAMES.items():
         count = fc.get(ft, 0)
         if count:
@@ -212,22 +234,22 @@ async def _advertiser_stats(client: TransparencyClient, args: argparse.Namespace
             print(f"  {name:<10} {count:>5}  ({pct}%)")
     print()
     if domains:
-        print("Top domains (from sample):")
+        print("Top domains:")
         for domain, cnt in domains.most_common(5):
             print(f"  {domain:<40} {cnt}")
         print()
-    fmt_dt = lambda dt: dt.strftime("%Y-%m-%d") if dt else "-"
     if earliest or latest:
-        print("Date range (from sample):")
-        print(f"  Earliest first_shown: {fmt_dt(earliest)}")
-        print(f"  Latest  last_shown:   {fmt_dt(latest)}")
+        print(f"Date range:      {fmt_dt(earliest)} → {fmt_dt(latest)}")
+    if monthly:
+        peak = sorted(monthly, key=monthly.get, reverse=True)[:3]
+        print(f"Peak months:     {', '.join(peak)}")
 
 
 async def _compare_advertisers(client: TransparencyClient, args: argparse.Namespace) -> None:
     adv1 = await client.get_advertiser(args.id1)
     adv2 = await client.get_advertiser(args.id2)
-    tc1, fc1, _, s1, e1, l1 = await _collect_stats(client, args.id1, args.pages)
-    tc2, fc2, _, s2, e2, l2 = await _collect_stats(client, args.id2, args.pages)
+    tc1, fc1, _, s1, e1, l1, *_ = await _collect_stats(client, args.id1, args.pages)
+    tc2, fc2, _, s2, e2, l2, *_ = await _collect_stats(client, args.id2, args.pages)
 
     name1 = ((adv1.name if adv1 else None) or args.id1)[:22]
     name2 = ((adv2.name if adv2 else None) or args.id2)[:22]
@@ -250,9 +272,12 @@ async def _compare_advertisers(client: TransparencyClient, args: argparse.Namesp
 
 
 def _ai_args(sub: argparse.ArgumentParser) -> None:
-    sub.add_argument("--provider", default="groq",
-                     help=f"AI provider: {', '.join(list_providers())}, or custom (default: groq)")
-    sub.add_argument("--model", default=None, help="Model name (uses provider default if omitted)")
+    default_provider = _cfg("ai", "provider") or os.environ.get("AI_PROVIDER") or "groq"
+    default_model = _cfg("ai", "model") or os.environ.get("AI_MODEL") or None
+    sub.add_argument("--provider", default=default_provider,
+                     help=f"AI provider: {', '.join(list_providers())}, or custom (default: {default_provider})")
+    sub.add_argument("--model", default=default_model,
+                     help="Model name (auto-detected if omitted)")
     sub.add_argument("--api-key", dest="api_key", default=None,
                      help="API key (uses env variable if omitted)")
     sub.add_argument("--base-url", dest="base_url", default=None,
@@ -264,30 +289,45 @@ async def _summarize_advertiser(client: TransparencyClient, args: argparse.Names
     if adv is None:
         print("Advertiser not found", file=sys.stderr)
         return
-    total_count, fc, domains, sampled, earliest, latest = await _collect_stats(
-        client, args.advertiser_id, args.pages
-    )
+    total_count, fc, domains, sampled, earliest, latest, monthly, avg_region, trend = \
+        await _collect_stats(client, args.advertiser_id, args.pages)
     fmt_dt = lambda dt: dt.strftime("%Y-%m-%d") if dt else "unknown"
-    facts = [
-        f"Advertiser: {adv.name} ({adv.advertiser_id}), country: {adv.country_code}",
-        f"Approximate total ads: {total_count or 'unknown'}",
+    peak_months = sorted(monthly, key=monthly.get, reverse=True)[:3] if monthly else []
+    fmt_lines = [
+        f"  {_FORMAT_NAMES.get(ft, 'Unknown')}: {round(100*cnt/sampled)}%"
+        for ft, cnt in sorted(fc.items(), key=lambda x: -x[1]) if sampled and cnt
     ]
-    if sampled:
-        for ft, name in _FORMAT_NAMES.items():
-            count = fc.get(ft, 0)
-            if count:
-                facts.append(f"{name} ads: {round(100 * count / sampled)}% of sample")
-    if domains:
-        facts.append(f"Top domains: {', '.join(d for d, _ in domains.most_common(5))}")
-    if earliest or latest:
-        facts.append(f"Date range: {fmt_dt(earliest)} to {fmt_dt(latest)}")
-    data_text = "\n".join(f"- {f}" for f in facts)
+    data = "\n".join([
+        f"Advertiser: {adv.name}",
+        f"Registered country: {adv.country_code or 'unknown'}",
+        f"Total ads in database: ~{total_count or 'unknown'}",
+        f"Sample analyzed: {sampled} creatives ({args.pages} page(s))",
+        f"Format mix (from sample):\n" + "\n".join(fmt_lines),
+        f"Average geographic reach per ad: {avg_region:.0f} regions",
+        f"Top advertised domains: {', '.join(d for d, _ in domains.most_common(5))}",
+        f"Activity period: {fmt_dt(earliest)} to {fmt_dt(latest)}",
+        f"Monthly activity trend: {trend}",
+        f"Peak activity months: {', '.join(peak_months) or 'unknown'}",
+    ])
     prompt = (
-        f"Here is advertising data from Google Ads Transparency Center:\n\n{data_text}\n\n"
-        "In 3-5 concise bullet points, summarize this advertiser's advertising strategy, "
-        "focusing on their format mix, geographic reach, and activity timeline."
+        f"You are a senior marketing analyst. Analyze this Google Ads Transparency Center "
+        f"data and provide a structured competitive intelligence report.\n\n"
+        f"DATA:\n{data}\n\n"
+        "Provide your analysis in this exact format:\n\n"
+        "## Executive Summary\n"
+        "[2-3 sentences capturing the core advertising strategy and market position]\n\n"
+        "## Format Strategy\n"
+        "[What the format mix reveals about their funnel, goals, and audience targeting]\n\n"
+        "## Geographic Reach\n"
+        f"[What {avg_region:.0f} avg regions per ad + country of registration reveals about targeting strategy]\n\n"
+        "## Activity Patterns\n"
+        "[Seasonality, trend direction, and what it implies about their business cycles]\n\n"
+        "## Competitive Implications\n"
+        "[What a direct competitor should know and how they should respond]\n\n"
+        "## 3 Actionable Recommendations\n"
+        "[Numbered, specific recommendations for a marketer analyzing this data]"
     )
-    print(f"Summarizing {adv.name} using {args.provider}...", file=sys.stderr)
+    print(f"Analyzing {adv.name} ({sampled} creatives) with {args.provider}...", file=sys.stderr)
     print(await ai_complete(prompt, provider=args.provider, model=args.model,
                             api_key=args.api_key, base_url=args.base_url))
 
@@ -295,61 +335,145 @@ async def _summarize_advertiser(client: TransparencyClient, args: argparse.Names
 async def _smart_compare(client: TransparencyClient, args: argparse.Namespace) -> None:
     adv1 = await client.get_advertiser(args.id1)
     adv2 = await client.get_advertiser(args.id2)
-    tc1, fc1, dom1, s1, e1, l1 = await _collect_stats(client, args.id1, args.pages)
-    tc2, fc2, dom2, s2, e2, l2 = await _collect_stats(client, args.id2, args.pages)
+    r1 = await _collect_stats(client, args.id1, args.pages)
+    r2 = await _collect_stats(client, args.id2, args.pages)
+    tc1, fc1, dom1, s1, e1, l1, mo1, ar1, tr1 = r1
+    tc2, fc2, dom2, s2, e2, l2, mo2, ar2, tr2 = r2
     fmt_dt = lambda dt: dt.strftime("%Y-%m-%d") if dt else "unknown"
 
-    def _block(adv, aid, tc, fc, dom, s, e, l) -> str:
+    def _block(adv, aid, tc, fc, dom, s, e, l, ar, tr) -> str:
         name = (adv.name if adv else aid) or aid
-        lines = [f"Name: {name}", f"Total ads: {tc or 'unknown'}"]
+        country = adv.country_code if adv else "unknown"
+        lines = [
+            f"Name: {name} (country: {country})",
+            f"Total ads in database: ~{tc or 'unknown'}",
+            f"Sample: {s} creatives",
+        ]
         if s:
             for ft, fn in _FORMAT_NAMES.items():
                 pct = round(100 * fc.get(ft, 0) / s)
                 if pct:
-                    lines.append(f"{fn}: {pct}%")
+                    lines.append(f"  {fn}: {pct}%")
+        lines.append(f"Avg geographic reach: {ar:.0f} regions per ad")
         if dom:
             lines.append(f"Top domains: {', '.join(d for d, _ in dom.most_common(3))}")
         lines.append(f"Active: {fmt_dt(e)} to {fmt_dt(l)}")
+        lines.append(f"Activity trend: {tr}")
         return "\n".join(f"  {x}" for x in lines)
 
     name1 = (adv1.name if adv1 else args.id1) or args.id1
     name2 = (adv2.name if adv2 else args.id2) or args.id2
     prompt = (
-        f"Advertising data for two advertisers (Google Ads Transparency Center):\n\n"
-        f"Advertiser A:\n{_block(adv1, args.id1, tc1, fc1, dom1, s1, e1, l1)}\n\n"
-        f"Advertiser B:\n{_block(adv2, args.id2, tc2, fc2, dom2, s2, e2, l2)}\n\n"
-        "Compare these two advertisers. What are the key strategic differences? "
-        "Who seems more aggressive? What can each learn from the other? "
-        "Give 4-6 actionable insights."
+        "You are a senior competitive intelligence analyst. Compare these two advertisers "
+        "based on Google Ads Transparency Center data.\n\n"
+        f"## Advertiser A\n{_block(adv1, args.id1, tc1, fc1, dom1, s1, e1, l1, ar1, tr1)}\n\n"
+        f"## Advertiser B\n{_block(adv2, args.id2, tc2, fc2, dom2, s2, e2, l2, ar2, tr2)}\n\n"
+        "Provide your analysis in this exact format:\n\n"
+        "## Head-to-Head Summary\n"
+        "[2-3 sentences on who is winning and why]\n\n"
+        "## Key Strategic Differences\n"
+        "[Format, reach, timing, and domain strategy differences]\n\n"
+        "## Aggression & Investment\n"
+        "[Who is investing more, scaling faster, or taking more risks]\n\n"
+        "## What A Can Learn from B\n"
+        "[Specific tactics or strategies to adopt]\n\n"
+        "## What B Can Learn from A\n"
+        "[Specific tactics or strategies to adopt]\n\n"
+        "## 3 Recommended Actions\n"
+        "[For a marketer who wants to outperform both advertisers]"
     )
-    print(f"Comparing {name1} vs {name2} using {args.provider}...", file=sys.stderr)
+    print(f"Comparing {name1} vs {name2} with {args.provider}...", file=sys.stderr)
     print(await ai_complete(prompt, provider=args.provider, model=args.model,
                             api_key=args.api_key, base_url=args.base_url))
 
 
 async def _suggest_keywords(client: TransparencyClient, args: argparse.Namespace) -> None:
-    page = await client.list_creatives(domain=args.domain, page_size=40)
-    domains: set[str] = set()
+    # Fetch 3 pages for richer domain/format signal
+    all_domains: collections.Counter[str] = collections.Counter()
     fc: collections.Counter[int] = collections.Counter()
-    for c in page.creatives:
-        if c.domain:
-            domains.add(c.domain)
-        fc[c.format_type or 0] += 1
-    data_text = "\n".join(f"- {l}" for l in [
-        f"Domain searched: {args.domain}",
-        f"Approximate total ads: {page.total_count or 'unknown'}",
-        f"Related domains: {', '.join(sorted(domains)[:10])}",
-        f"Display: {fc[1]}, Video: {fc[2]}, Search: {fc[3]} (first page sample)",
+    total_count = None
+    cursor: str | None = None
+    for _ in range(3):
+        page = await client.list_creatives(domain=args.domain, page_size=40, cursor=cursor)
+        if total_count is None:
+            total_count = page.total_count
+        for c in page.creatives:
+            if c.domain:
+                all_domains[c.domain] += 1
+            fc[c.format_type or 0] += 1
+        if not page.next_cursor:
+            break
+        cursor = page.next_cursor
+    sampled = sum(fc.values())
+    fmt_mix = ", ".join(
+        f"{_FORMAT_NAMES.get(ft,'?')}: {round(100*cnt/sampled)}%"
+        for ft, cnt in sorted(fc.items(), key=lambda x: -x[1]) if sampled and cnt
+    )
+    top_domains = [d for d, _ in all_domains.most_common(15)]
+    data = "\n".join([
+        f"Target domain: {args.domain}",
+        f"Total ads in database for this domain: ~{total_count or 'unknown'}",
+        f"Sample analyzed: {sampled} creatives",
+        f"Format mix: {fmt_mix}",
+        f"Related/advertised domains ({len(top_domains)} found): {', '.join(top_domains)}",
     ])
     prompt = (
-        f'A marketer is researching "{args.domain}" via Google Ads Transparency Center:\n\n'
-        f"{data_text}\n\n"
-        "Suggest 10-15 high-value search keywords they should target to compete with or "
-        "complement advertisers on this domain. Group by theme. Be specific and actionable."
+        f"You are a PPC and SEO keyword strategist. A client wants to compete with or "
+        f"complement advertisers running ads on '{args.domain}' "
+        f"(data from Google Ads Transparency Center).\n\n"
+        f"DATA:\n{data}\n\n"
+        "Provide your keyword strategy in this exact format:\n\n"
+        "## Competitor Brand Keywords\n"
+        "[Brand + competitor terms to bid on]\n\n"
+        "## Product/Service Keywords\n"
+        "[Core product terms based on the domain and related domains]\n\n"
+        "## Intent-Based Keywords\n"
+        "[High-intent transactional terms grouped by funnel stage]\n\n"
+        "## Long-Tail Opportunities\n"
+        "[Specific low-competition, high-conversion phrases]\n\n"
+        "## Negative Keywords to Exclude\n"
+        "[Terms to exclude to protect budget]\n\n"
+        "## Bidding Priority Order\n"
+        "[Which group to invest in first and why]"
     )
-    print(f"Suggesting keywords for {args.domain} using {args.provider}...", file=sys.stderr)
+    print(f"Analyzing {args.domain} with {args.provider}...", file=sys.stderr)
     print(await ai_complete(prompt, provider=args.provider, model=args.model,
                             api_key=args.api_key, base_url=args.base_url))
+
+
+def _config_init(args: argparse.Namespace) -> None:
+    target = Path.home() / ".config" / "ads-transparency" if getattr(args, "global_", False) else Path(".")
+    target.mkdir(parents=True, exist_ok=True)
+    cfg_path = target / ("config.toml" if getattr(args, "global_", False) else "ads-transparency.toml")
+    env_path = target / (".ads-transparency.env" if getattr(args, "global_", False) else ".env")
+    if not cfg_path.exists():
+        write_sample_config(cfg_path)
+        print(f"Created {cfg_path}")
+    else:
+        print(f"Already exists: {cfg_path}")
+    if not env_path.exists():
+        write_sample_env(env_path)
+        print(f"Created {env_path}")
+    else:
+        print(f"Already exists: {env_path}")
+
+
+def _config_show() -> None:
+    import pprint
+    cfg = get_config()
+    if cfg:
+        pprint.pprint(cfg)
+    else:
+        print("No config file found. Run:  python -m client config init")
+    print()
+    ai_keys = ["GROQ_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "TOGETHER_API_KEY",
+               "AI_PROVIDER", "AI_MODEL", "AI_API_KEY", "AI_BASE_URL"]
+    print("Active environment variables:")
+    for k in ai_keys:
+        v = os.environ.get(k)
+        if v:
+            masked = v[:6] + "..." + v[-4:] if len(v) > 12 else "***"
+            print(f"  {k} = {masked}")
 
 
 async def _download_previews(client: TransparencyClient, args: argparse.Namespace) -> None:
@@ -436,6 +560,14 @@ def build_parser() -> argparse.ArgumentParser:
     sk.add_argument("domain", help="Domain to research (e.g. nike.com)")
     _ai_args(sk)
 
+    # config
+    cfg_p = subparsers.add_parser("config", help="Manage configuration files")
+    cfg_sub = cfg_p.add_subparsers(dest="config_command", required=True)
+    cfg_init = cfg_sub.add_parser("init", help="Create sample config and .env files")
+    cfg_init.add_argument("--global", dest="global_", action="store_true",
+                          help="Write to ~/.config/ads-transparency/ instead of current directory")
+    cfg_sub.add_parser("show", help="Show current config and active API keys")
+
     # download-previews
     dl = subparsers.add_parser("download-previews", help="Download ad preview images for an advertiser")
     dl.add_argument("advertiser_id", help="Advertiser ID (AR...)")
@@ -447,11 +579,27 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    get_config()  # load .env + config file into os.environ before argparse reads env
     parser = build_parser()
     args = parser.parse_args(argv)
 
+    # config commands don't need a live client
+    if args.command == "config":
+        if args.config_command == "init":
+            _config_init(args)
+        elif args.config_command == "show":
+            _config_show()
+        return 0
+
+    _timeout = _cfg("client", "timeout", 20)
+    _interval = _cfg("client", "min_interval", 0.25)
+    _retries = _cfg("client", "max_retries", 3)
+    _proxy = _cfg("client", "proxy") or None
+
     async def _run() -> None:
-        async with TransparencyClient() as client:
+        async with TransparencyClient(
+            timeout=_timeout, min_interval=_interval, max_retries=_retries, proxy=_proxy
+        ) as client:
             if args.command == "search-advertisers":
                 await _search_advertisers(client, args)
             elif args.command == "list-creatives":
